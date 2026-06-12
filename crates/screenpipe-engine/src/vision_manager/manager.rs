@@ -75,6 +75,9 @@ pub enum VisionManagerStatus {
     ShuttingDown,
 }
 
+/// Handle + stop flag for one running video-input capture task.
+type VideoInputTask = (JoinHandle<()>, Arc<AtomicBool>);
+
 /// Manages vision recording across multiple monitors with dynamic detection
 pub struct VisionManager {
     config: VisionManagerConfig,
@@ -121,7 +124,7 @@ pub struct VisionManager {
     /// long-running FFmpeg-backed capture task per configured non-monitor
     /// video input (e.g. DirectShow capture cards). Independent of the
     /// monitor maps above — these are not monitors.
-    video_input_tasks: Arc<DashMap<String, (JoinHandle<()>, Arc<AtomicBool>)>>,
+    video_input_tasks: Arc<DashMap<String, VideoInputTask>>,
 }
 
 impl VisionManager {
