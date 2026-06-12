@@ -76,6 +76,9 @@ pub struct RecordingConfig {
     pub monitor_ids: Vec<String>,
     pub use_all_monitors: bool,
 
+    /// Non-monitor video input sources (e.g. DirectShow capture cards on Windows).
+    pub video_inputs: Vec<screenpipe_config::VideoInputConfig>,
+
     // Filters
     pub ignored_windows: Vec<String>,
     pub included_windows: Vec<String>,
@@ -278,6 +281,7 @@ impl RecordingConfig {
             macos_input_vpio_enabled: settings.macos_input_vpio_enabled,
             monitor_ids: settings.monitor_ids.clone(),
             use_all_monitors: settings.use_all_monitors,
+            video_inputs: settings.video_inputs.clone(),
             ignored_windows: settings.ignored_windows.clone(),
             included_windows: settings.included_windows.clone(),
             ignored_urls: settings.ignored_urls.clone(),
@@ -457,6 +461,7 @@ impl RecordingConfig {
             use_pii_removal: self.use_pii_removal,
             monitor_ids: self.monitor_ids.clone(),
             use_all_monitors: self.use_all_monitors,
+            video_inputs: self.video_inputs.clone(),
             ignore_incognito_windows: self.ignore_incognito_windows,
             pause_on_drm_content: self.pause_on_drm_content,
             languages: self.languages.clone(),

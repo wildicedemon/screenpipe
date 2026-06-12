@@ -32,6 +32,53 @@ pub struct ScheduleRule {
     pub record_mode: String,
 }
 
+/// A non-monitor video input source (e.g. a capture card exposed as a
+/// DirectShow video device on Windows, such as "Streamer X").
+///
+/// These sources are captured into the same visual frame/timeline storage as
+/// monitors, but they are not OS monitors — they never appear in
+/// `list_monitors()` and are managed separately by the engine.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "specta", derive(specta::Type))]
+#[serde(rename_all = "camelCase")]
+pub struct VideoInputConfig {
+    /// Whether this input should be captured.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Capture backend. Currently only "dshow" (Windows DirectShow) is supported.
+    #[serde(default = "default_video_input_backend")]
+    pub backend: String,
+    /// Exact device name as reported by the backend
+    /// (e.g. ffmpeg `-list_devices true -f dshow -i dummy` → "Streamer X").
+    pub device_name: String,
+    /// Optional human-friendly name shown in the timeline; defaults to `device_name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Requested capture width (passed to the device); None = device default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Requested capture height (passed to the device); None = device default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Requested device framerate; None = device default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub framerate: Option<u32>,
+    /// Interval between stored frames in milliseconds.
+    #[serde(default = "default_video_input_capture_interval_ms")]
+    pub capture_interval_ms: u64,
+    /// Rotation applied to each frame before storage: 0, 90, 180 or 270 degrees.
+    #[serde(default)]
+    pub rotation: u16,
+}
+
+fn default_video_input_backend() -> String {
+    "dshow".to_string()
+}
+
+fn default_video_input_capture_interval_ms() -> u64 {
+    5000
+}
+
 /// The single source of truth for recording/capture configuration.
 ///
 /// Used by:
@@ -156,6 +203,11 @@ pub struct RecordingSettings {
     /// Capture from all connected monitors.
     #[serde(rename = "useAllMonitors")]
     pub use_all_monitors: bool,
+
+    /// Non-monitor video input sources (e.g. DirectShow capture cards on
+    /// Windows). Captured into the same visual timeline as monitors.
+    #[serde(rename = "videoInputs", default)]
+    pub video_inputs: Vec<VideoInputConfig>,
 
     /// Video quality preset: "low", "balanced", "high", "max".
     #[serde(rename = "videoQuality")]
@@ -558,6 +610,7 @@ impl Default for RecordingSettings {
             disable_timeline: false,
             monitor_ids: vec![],
             use_all_monitors: true,
+            video_inputs: vec![],
             video_quality: "balanced".to_string(),
             max_snapshot_width: default_max_snapshot_width(),
             disable_snapshot_compaction: false,
@@ -678,6 +731,52 @@ mod tests {
         assert_eq!(settings.video_quality, "balanced");
         assert!(settings.use_system_default_audio);
         assert!(settings.ignore_incognito_windows);
+    }
+
+    #[test]
+    fn deserializes_video_inputs() {
+        let json = r#"{
+            "videoInputs": [
+                {
+                    "enabled": true,
+                    "backend": "dshow",
+                    "deviceName": "Streamer X",
+                    "displayName": "Streamer X",
+                    "width": 2560,
+                    "height": 1440,
+                    "framerate": 60,
+                    "captureIntervalMs": 5000,
+                    "rotation": 90
+                }
+            ]
+        }"#;
+        let settings: RecordingSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.video_inputs.len(), 1);
+        let input = &settings.video_inputs[0];
+        assert!(input.enabled);
+        assert_eq!(input.backend, "dshow");
+        assert_eq!(input.device_name, "Streamer X");
+        assert_eq!(input.display_name.as_deref(), Some("Streamer X"));
+        assert_eq!(input.width, Some(2560));
+        assert_eq!(input.height, Some(1440));
+        assert_eq!(input.framerate, Some(60));
+        assert_eq!(input.capture_interval_ms, 5000);
+        assert_eq!(input.rotation, 90);
+    }
+
+    #[test]
+    fn video_input_minimal_uses_defaults() {
+        let json = r#"{"videoInputs": [{"deviceName": "Streamer X"}]}"#;
+        let settings: RecordingSettings = serde_json::from_str(json).unwrap();
+        let input = &settings.video_inputs[0];
+        assert!(input.enabled);
+        assert_eq!(input.backend, "dshow");
+        assert_eq!(input.capture_interval_ms, 5000);
+        assert_eq!(input.rotation, 0);
+        assert!(input.width.is_none() && input.height.is_none() && input.framerate.is_none());
+        // Settings without videoInputs default to empty (backwards compatible).
+        let empty: RecordingSettings = serde_json::from_str("{}").unwrap();
+        assert!(empty.video_inputs.is_empty());
     }
 
     #[test]

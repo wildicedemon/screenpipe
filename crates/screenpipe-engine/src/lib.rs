@@ -55,6 +55,7 @@ pub mod ui_recorder;
 // `finish_ffmpeg_process` without re-implementing the encoder pipeline.
 pub mod video;
 pub mod video_cache;
+pub mod video_input_capture;
 pub mod video_utils;
 pub mod vision_manager;
 pub mod workflow_classifier;

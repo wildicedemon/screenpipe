@@ -60,6 +60,11 @@ pub struct VisionManagerConfig {
     /// Override `EventDrivenCaptureConfig::capture_on_clipboard`.
     /// None = engine default (false). PowerProfile does not touch this.
     pub capture_on_clipboard: Option<bool>,
+
+    /// Non-monitor video input sources (e.g. DirectShow capture cards on
+    /// Windows). Captured into the same visual timeline as monitors but never
+    /// treated as `SafeMonitor`s.
+    pub video_inputs: Vec<screenpipe_config::VideoInputConfig>,
 }
 
 /// Status of the VisionManager
@@ -112,6 +117,11 @@ pub struct VisionManager {
     /// Set when the user's monitor allowlist matched zero connected displays and
     /// we fell back to recording every monitor. Clears the filter for hot-plug too.
     stale_allowlist_fallback: Arc<AtomicBool>,
+    /// Map of video-input device_name -> (JoinHandle, stop flag). One
+    /// long-running FFmpeg-backed capture task per configured non-monitor
+    /// video input (e.g. DirectShow capture cards). Independent of the
+    /// monitor maps above — these are not monitors.
+    video_input_tasks: Arc<DashMap<String, (JoinHandle<()>, Arc<AtomicBool>)>>,
 }
 
 impl VisionManager {
@@ -163,6 +173,7 @@ impl VisionManager {
             focus_controller,
             high_fps_controller: None,
             stale_allowlist_fallback: Arc::new(AtomicBool::new(false)),
+            video_input_tasks: Arc::new(DashMap::new()),
         }
     }
 
@@ -275,6 +286,10 @@ impl VisionManager {
             }
         }
 
+        // Start non-monitor video inputs (DirectShow capture cards, etc.).
+        // These are independent of monitor enumeration and the allowlist.
+        self.start_video_inputs();
+
         let mut task_count = self.recording_tasks.len();
         if task_count == 0 && total_monitors > 0 && !self.config.use_all_monitors {
             warn!(
@@ -306,6 +321,15 @@ impl VisionManager {
         }
 
         if task_count == 0 {
+            if !self.video_input_tasks.is_empty() {
+                // No monitors matched, but external video inputs are running —
+                // keep the manager alive for them.
+                info!(
+                    "VisionManager started with 0 monitor(s) and {} video input(s)",
+                    self.video_input_tasks.len()
+                );
+                return Ok(());
+            }
             // Roll status back so the next .start() attempt isn't blocked by the
             // idempotency guard above.
             *self.status.write().await = VisionManagerStatus::Stopped;
@@ -355,6 +379,9 @@ impl VisionManager {
             }
         }
 
+        // Stop all non-monitor video inputs.
+        self.stop_video_inputs();
+
         // Aborting capture tasks does NOT release sck_rs's global SCStream handles.
         // Explicitly tear them down so macOS sees no active ScreenCaptureKit usage.
         #[cfg(target_os = "macos")]
@@ -373,6 +400,87 @@ impl VisionManager {
         *status = VisionManagerStatus::Stopped;
 
         Ok(())
+    }
+
+    /// Spawn one long-running capture task per enabled non-monitor video
+    /// input (e.g. DirectShow capture cards). Idempotent — inputs that
+    /// already have a live task keep it. Platform gating (the "dshow"
+    /// backend is Windows-only) happens inside the capture loop so
+    /// non-Windows builds compile and log a clear warning.
+    fn start_video_inputs(&self) {
+        use crate::video::{video_quality_to_jpeg_quality, video_quality_to_max_snapshot_width};
+        use screenpipe_screen::snapshot_writer::SnapshotWriter;
+
+        for input in &self.config.video_inputs {
+            if !input.enabled {
+                continue;
+            }
+            let key = crate::video_input_capture::device_name_for(input);
+            if let Some(entry) = self.video_input_tasks.get(&key) {
+                if !entry.value().0.is_finished() {
+                    debug!("video input '{}' is already capturing", input.device_name);
+                    continue;
+                }
+                drop(entry);
+                self.video_input_tasks.remove(&key);
+            }
+
+            // Same quality derivation as the monitor snapshot writers.
+            let baseline_q = video_quality_to_jpeg_quality(&self.config.video_quality);
+            let initial_jpeg_quality = self
+                .power_profile_rx
+                .as_ref()
+                .map(|rx| rx.borrow().jpeg_quality.min(baseline_q))
+                .unwrap_or(baseline_q);
+            let snapshot_writer = Arc::new(SnapshotWriter::new(
+                format!("{}/data", self.config.output_path),
+                initial_jpeg_quality,
+                video_quality_to_max_snapshot_width(&self.config.video_quality),
+            ));
+
+            let stop_signal = Arc::new(AtomicBool::new(false));
+            let db = self.db.clone();
+            let config = input.clone();
+            let vision_metrics = self.config.vision_metrics.clone();
+            let hot_frame_cache = self.hot_frame_cache.clone();
+            let device_name = input.device_name.clone();
+            let stop_clone = stop_signal.clone();
+
+            info!("Starting video input capture for '{}'", device_name);
+            let handle = self.vision_handle.spawn(async move {
+                if let Err(e) = crate::video_input_capture::video_input_capture_loop(
+                    db,
+                    config,
+                    snapshot_writer,
+                    vision_metrics,
+                    hot_frame_cache,
+                    stop_clone,
+                )
+                .await
+                {
+                    error!("video input capture failed for '{}': {:?}", device_name, e);
+                }
+            });
+            self.video_input_tasks.insert(key, (handle, stop_signal));
+        }
+    }
+
+    /// Stop all non-monitor video input capture tasks. Sets each stop flag
+    /// (so the loop kills its FFmpeg child cleanly) then aborts the task;
+    /// `kill_on_drop` on the FFmpeg child is the backstop.
+    fn stop_video_inputs(&self) {
+        let keys: Vec<String> = self
+            .video_input_tasks
+            .iter()
+            .map(|e| e.key().clone())
+            .collect();
+        for key in keys {
+            if let Some((_, (handle, stop_signal))) = self.video_input_tasks.remove(&key) {
+                info!("Stopping video input capture '{}'", key);
+                stop_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+                handle.abort();
+            }
+        }
     }
 
     /// Start recording on a specific monitor
@@ -697,6 +805,7 @@ mod tests {
             min_capture_interval_ms: None,
             capture_on_keystroke: None,
             capture_on_clipboard: None,
+            video_inputs: vec![],
         };
         VisionManager::new(config, db, Handle::current())
     }
