@@ -826,6 +826,14 @@ fn sck_monitor_error_allows_fallback(error: &MonitorListError) -> bool {
 
 /// List monitors with detailed error information (permission denied vs no monitors)
 pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    // Capture-device pseudo-monitors (HDMI/UVC grabbers) surfaced alongside the
+    // real displays so they flow through the same selection + recording path.
+    // Read from the registry populated by `refresh_capture_devices`.
+    let capture_monitors: Vec<SafeMonitor> = crate::dshow_capture::capture_device_monitors()
+        .into_iter()
+        .map(|(id, data)| SafeMonitor::new_virtual(id, data))
+        .collect();
+
     // sck-rs initiates the callback and converts the returned topology inside
     // scoped autorelease pools. The legacy xcap path retains its blocking
     // worker pool below.
@@ -844,6 +852,23 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
         // macOS < 12.3 never enters ScreenCaptureKit. Preserve the legacy xcap
         // behavior exactly instead of applying an unneeded SCK timeout policy.
         enumerate_xcap_monitors_bounded().await
+    };
+
+    // Append capture devices to the real displays. If enumeration found no
+    // monitors (headless / capture-only box) but we have capture devices,
+    // surface those instead of erroring so they can still be recorded.
+    let result = match result {
+        Ok(mut monitors) => {
+            monitors.extend(capture_monitors);
+            Ok(monitors)
+        }
+        // Do NOT substitute capture devices for a display-enumeration failure.
+        // On macOS an empty ScreenCaptureKit result (NoMonitorsFound) is how a
+        // lapsed Screen Recording grant is signalled, and the monitor watcher
+        // must still see it; masking it whenever a capture device happens to be
+        // present would silently defeat permission-loss detection. Propagate the
+        // error unchanged (capture cards still append on the Ok path above).
+        Err(e) => Err(e),
     };
 
     if let Ok(monitors) = &result {
@@ -898,6 +923,20 @@ pub async fn get_default_monitor() -> Option<SafeMonitor> {
 }
 
 pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
+    // Capture-device pseudo-monitors resolve from the registry, not the OS.
+    if let Some(e) = crate::dshow_capture::capture_device_entry(id) {
+        return Some(SafeMonitor::new_virtual(
+            id,
+            MonitorData {
+                width: e.width,
+                height: e.height,
+                x: 0,
+                y: 0,
+                name: e.label,
+                is_primary: false,
+            },
+        ));
+    }
     // Serve a recent enumeration instead of a fresh SCK round-trip. Callers hit
     // this several times a second only to read a display's geometry, and on a
     // slow ScreenCaptureKit daemon each miss leaks a wedged worker.

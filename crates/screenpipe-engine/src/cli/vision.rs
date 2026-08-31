@@ -21,6 +21,7 @@ pub async fn handle_vision_command(subcommand: &VisionCommand) -> anyhow::Result
                                 "width": m.width(),
                                 "height": m.height(),
                                 "is_default": m.is_primary(),
+                                "is_capture": screenpipe_screen::dshow_capture::capture_device_entry(m.id()).is_some(),
                             })
                         }).collect::<Vec<_>>(),
                         "success": true
@@ -29,7 +30,15 @@ pub async fn handle_vision_command(subcommand: &VisionCommand) -> anyhow::Result
                 OutputFormat::Text => {
                     println!("available monitors:");
                     for monitor in monitors.iter() {
-                        println!("  {}. {:?}", monitor.id(), monitor.name());
+                        let suffix =
+                            if screenpipe_screen::dshow_capture::capture_device_entry(monitor.id())
+                                .is_some()
+                            {
+                                " (capture device)"
+                            } else {
+                                ""
+                            };
+                        println!("  {}. {:?}{}", monitor.id(), monitor.name(), suffix);
                     }
                 }
             }

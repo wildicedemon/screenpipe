@@ -57,6 +57,12 @@ const WEDGE_MIN_UPTIME_SECS: f64 = 120.0;
 /// (e.g. a disk still stalled) can't turn into a restart storm.
 const WEDGE_RESTART_COOLDOWN: Duration = Duration::from_secs(300);
 
+/// How often the reconcile loop re-enumerates capture devices for hot-plug
+/// detection. The loop itself polls every ~5s (Windows/Linux) but enumerating
+/// capture devices spawns `ffmpeg -list_devices`, so this is throttled well
+/// above the poll interval; a plug/unplug is picked up within this window.
+const CAPTURE_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
+
 // ── Gone-silent / dead-loop watchdog ────────────────────────────────────────
 //
 // The wedge watchdog above only fires while the loop is STILL ATTEMPTING
@@ -633,6 +639,12 @@ pub async fn start_monitor_watcher(
         let mut recovery_retry_warned = false;
         // Last time the silent-wedge watchdog restarted capture (cooldown gate).
         let mut last_vision_restart: Option<Instant> = None;
+        // Last time the capture-device registry was hot-plug-refreshed. The
+        // reconcile loop polls every ~5s (Windows/Linux); re-enumerating capture
+        // devices (which spawns `ffmpeg -list_devices`) that often is wasteful,
+        // so throttle to CAPTURE_REFRESH_INTERVAL. Only runs when the capture
+        // feature is enabled.
+        let mut last_capture_refresh: Option<Instant> = None;
         // Display-layout snapshotting (see canonical_display_layout_json).
         // Seeded from the DB so a process restart with an unchanged
         // arrangement writes nothing. Diffed on the FULL geometry — not the
@@ -880,6 +892,23 @@ pub async fn start_monitor_watcher(
                     }
                 }
                 continue;
+            }
+
+            // Hot-plug capture devices: refresh the capture registry so a
+            // plugged/unplugged grabber enters/leaves `current_ids` below and the
+            // existing add/remove diff starts/stops its loop — the same mechanism
+            // real monitors use. Gated on the opt-in (feature-off users pay
+            // nothing) and throttled so the ~5s poll doesn't spawn ffmpeg every
+            // tick. The refresh is incremental: a device already being recorded
+            // keeps its entry and is not re-probed (no device-busy conflict).
+            if vision_manager.record_capture_devices() {
+                let due = last_capture_refresh
+                    .map(|t| t.elapsed() >= CAPTURE_REFRESH_INTERVAL)
+                    .unwrap_or(true);
+                if due {
+                    screenpipe_screen::dshow_capture::refresh_capture_devices().await;
+                    last_capture_refresh = Some(Instant::now());
+                }
             }
 
             // Get currently connected monitors with detailed error info

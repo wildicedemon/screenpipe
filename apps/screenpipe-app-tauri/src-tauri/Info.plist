@@ -8,6 +8,8 @@
     <string>This app requires screen capture access to record the screen.</string>
     <key>CGRequestScreenCaptureAccess</key>
     <string>This app requires screen capture access to record the screen.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>screenpipe can record external HDMI/USB capture cards (e.g. a game console, camera, or another computer's screen), which macOS exposes as camera devices. This is off by default and your video stays on-device.</string>
     <key>NSAudioCaptureUsageDescription</key>
     <string>screenpipe captures system audio (via the CoreAudio Process Tap) for local transcription. Specific apps can be excluded by listing their bundle IDs in ~/.screenpipe/audio-exclusions.json.</string>
     <key>NSSystemExtensionUsageDescription</key>

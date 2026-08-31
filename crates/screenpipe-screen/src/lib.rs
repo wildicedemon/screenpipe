@@ -57,6 +57,9 @@ pub use microsoft::perform_ocr_windows;
 pub use tesseract::{perform_ocr_tesseract, tesseract_available};
 pub mod browser_utils;
 pub mod snapshot_writer;
+// Cross-platform external capture-device (HDMI/UVC grabber) support. The ffmpeg
+// input backend is per-OS (dshow / avfoundation / v4l2); see the module.
+pub mod dshow_capture;
 
 /// True when the native ScreenCaptureKit sync-worker containment layer has
 /// reached its hard parked-worker ceiling.

@@ -14,6 +14,11 @@ use tracing::{debug, error, info, warn};
 pub enum OSPermission {
     ScreenRecording,
     Microphone,
+    /// macOS Camera (TCC). Needed only for the optional capture-device feature —
+    /// external HDMI/USB grabbers enumerate as AVFoundation camera devices —
+    /// so it is requested lazily when that feature is enabled, NOT part of the
+    /// standard onboarding permission set.
+    Camera,
     Accessibility,
     Automation,
     InputMonitoring,
@@ -173,6 +178,9 @@ fn permission_settings_url(permission: &OSPermission) -> &'static str {
         OSPermission::Microphone => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
         }
+        OSPermission::Camera => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Camera"
+        }
         OSPermission::Accessibility => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
         }
@@ -243,6 +251,28 @@ pub async fn request_permission(app: tauri::AppHandle, permission: OSPermission)
                     }
                     _ => {
                         open_permission_settings(OSPermission::Microphone);
+                    }
+                }
+            }
+            OSPermission::Camera => {
+                // Mirror Microphone: capture grabbers are AVFoundation camera
+                // devices, so the camera TCC prompt must be triggered from the
+                // app (a child ffmpeg opening the device would just be denied
+                // while NotDetermined). Requested only when the user enables the
+                // capture-device feature.
+                use nokhwa_bindings_macos::AVAuthorizationStatus;
+                use objc::*;
+                let cls = objc::class!(AVCaptureDevice);
+                let status: AVAuthorizationStatus = unsafe {
+                    msg_send![cls, authorizationStatusForMediaType:AVMediaType::Video.into_ns_str()]
+                };
+                match status {
+                    AVAuthorizationStatus::Authorized => {}
+                    AVAuthorizationStatus::NotDetermined => {
+                        request_av_permission(app.clone(), AVMediaType::Video);
+                    }
+                    _ => {
+                        open_permission_settings(OSPermission::Camera);
                     }
                 }
             }
@@ -674,6 +704,19 @@ pub async fn check_permission(permission: OSPermission) -> OSPermissionStatus {
         match permission {
             OSPermission::ScreenRecording => check_screen_recording_permission(),
             OSPermission::Microphone => check_microphone_permission(),
+            OSPermission::Camera => {
+                use nokhwa_bindings_macos::{AVAuthorizationStatus, AVMediaType};
+                use objc::*;
+                let cls = objc::class!(AVCaptureDevice);
+                let status: AVAuthorizationStatus = unsafe {
+                    msg_send![cls, authorizationStatusForMediaType:AVMediaType::Video.into_ns_str()]
+                };
+                match status {
+                    AVAuthorizationStatus::Authorized => OSPermissionStatus::Granted,
+                    AVAuthorizationStatus::NotDetermined => OSPermissionStatus::Empty,
+                    _ => OSPermissionStatus::Denied,
+                }
+            }
             OSPermission::Accessibility => check_accessibility_permission(),
             OSPermission::InputMonitoring => {
                 if screenpipe_a11y::check_input_monitoring() {
@@ -718,6 +761,7 @@ pub async fn reset_permission(
         let service = match &permission {
             OSPermission::ScreenRecording => "ScreenCapture",
             OSPermission::Microphone => "Microphone",
+            OSPermission::Camera => "Camera",
             OSPermission::Accessibility => "Accessibility",
             OSPermission::InputMonitoring => "ListenEvent",
             OSPermission::Calendar => "Calendar",
@@ -781,6 +825,7 @@ pub async fn reset_and_request_permission(
         let service = match &permission {
             OSPermission::ScreenRecording => "ScreenCapture",
             OSPermission::Microphone => "Microphone",
+            OSPermission::Camera => "Camera",
             OSPermission::Accessibility => "Accessibility",
             OSPermission::InputMonitoring => "ListenEvent",
             OSPermission::Calendar => "Calendar",
@@ -1576,6 +1621,7 @@ mod permission_settings_tests {
         let cases = [
             (OSPermission::ScreenRecording, "Privacy_ScreenCapture"),
             (OSPermission::Microphone, "Privacy_Microphone"),
+            (OSPermission::Camera, "Privacy_Camera"),
             (OSPermission::Accessibility, "Privacy_Accessibility"),
             (OSPermission::Automation, "Privacy_Automation"),
             (OSPermission::InputMonitoring, "Privacy_ListenEvent"),

@@ -44,6 +44,16 @@ pub struct RecordingConfig {
     /// that only the timeline streaming endpoint consumes).
     pub disable_timeline: bool,
     pub use_pii_removal: bool,
+    /// Mitsukeru fork: opt-in gate for recording video capture devices
+    /// (HDMI/UVC grabbers) that enumerate as pseudo-monitors. Off by
+    /// default — devices stay visible in the monitor list but are not
+    /// recorded unless this is set. Threaded to `VisionManagerConfig`.
+    pub record_capture_devices: bool,
+    /// Mitsukeru fork: numeric ids of the capture devices selected for
+    /// recording, kept SEPARATE from `monitor_ids` so a capture selection
+    /// never affects display recording. Empty means record none (see
+    /// `VisionManager::is_monitor_allowed`). Threaded to `VisionManagerConfig`.
+    pub capture_device_ids: Vec<String>,
     /// Async text PII redaction: runs the background reconciliation
     /// worker over OCR / transcripts / accessibility / ui_events and
     /// overwrites the source columns with the redacted text. Off by
@@ -299,6 +309,8 @@ impl RecordingConfig {
             semantic_context_mode: settings.semantic_context_mode,
             disable_timeline: settings.disable_timeline,
             use_pii_removal: settings.use_pii_removal,
+            record_capture_devices: settings.record_capture_devices,
+            capture_device_ids: settings.capture_device_ids.clone(),
             async_pii_redaction: settings.async_pii_redaction,
             redact_agent_session_secrets: settings.redact_agent_session_secrets,
             async_image_pii_redaction: settings.async_image_pii_redaction,
@@ -540,6 +552,8 @@ impl RecordingConfig {
             included_urls: self.included_urls.clone(),
             vision_metrics,
             use_pii_removal: self.use_pii_removal,
+            record_capture_devices: self.record_capture_devices,
+            capture_device_ids: self.capture_device_ids.clone(),
             monitor_ids: self.monitor_ids.clone(),
             use_all_monitors: self.use_all_monitors,
             ignore_incognito_windows: self.ignore_incognito_windows,
@@ -800,6 +814,7 @@ mod tests {
             enhanced_incognito_detection: true,
             pause_on_drm_content: true,
             monitor_ids: vec!["MONITOR-1".to_string()],
+            capture_device_ids: vec!["4026531841".to_string()],
             use_all_monitors: false,
             video_quality: "high".to_string(),
             idle_capture_interval_ms: Some(2_000),
@@ -825,6 +840,7 @@ mod tests {
         assert_eq!(vision.ignored_urls, settings.ignored_urls);
         assert_eq!(vision.included_urls, settings.included_urls);
         assert_eq!(vision.monitor_ids, settings.monitor_ids);
+        assert_eq!(vision.capture_device_ids, settings.capture_device_ids);
         assert!(!vision.use_all_monitors);
         assert!(vision.ignore_incognito_windows);
         assert!(vision.enhanced_incognito_detection);

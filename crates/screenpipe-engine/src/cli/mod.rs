@@ -516,6 +516,13 @@ pub struct RecordArgs {
     #[arg(long, action = ArgAction::Set, num_args = 0..=1, default_value_t = true, default_missing_value = "true")]
     pub use_pii_removal: bool,
 
+    /// Record video capture devices (HDMI / UVC grabbers) that enumerate as
+    /// pseudo-monitors. Off by default: capture devices still appear in the
+    /// monitor list but are not recorded unless this flag is set. Accepts a
+    /// bare `--record-capture-devices` or `--record-capture-devices true|false`.
+    #[arg(long, action = ArgAction::Set, num_args = 0..=1, default_value_t = false, default_missing_value = "true")]
+    pub record_capture_devices: bool,
+
     /// Enable the async PII reconciliation worker. Runs a background
     /// task after capture that OVERWRITES PII in the source columns
     /// of ocr_text, audio_transcriptions, frames.accessibility_text,
@@ -900,6 +907,7 @@ pub struct RecordArgSources {
     pub use_all_monitors: bool,
     pub language: bool,
     pub use_pii_removal: bool,
+    pub record_capture_devices: bool,
     pub async_pii_redaction: bool,
     pub redact_agent_session_secrets: bool,
     pub async_image_pii_redaction: bool,
@@ -966,6 +974,7 @@ impl RecordArgSources {
             use_all_monitors: from_command_line(record, "use_all_monitors"),
             language: from_command_line(record, "language"),
             use_pii_removal: from_command_line(record, "use_pii_removal"),
+            record_capture_devices: from_command_line(record, "record_capture_devices"),
             async_pii_redaction: from_command_line(record, "async_pii_redaction"),
             redact_agent_session_secrets: from_command_line(record, "redact_agent_session_secrets"),
             async_image_pii_redaction: from_command_line(record, "async_image_pii_redaction"),
@@ -1021,6 +1030,7 @@ impl RecordArgSources {
             || self.use_all_monitors
             || self.language
             || self.use_pii_removal
+            || self.record_capture_devices
             || self.async_pii_redaction
             || self.redact_agent_session_secrets
             || self.async_image_pii_redaction
@@ -1201,6 +1211,15 @@ impl RecordArgs {
             // toggle. Default to enabled (timeline on) for the engine binary.
             disable_timeline: false,
             use_pii_removal: self.use_pii_removal,
+            record_capture_devices: self.record_capture_devices,
+            // Capture-device SELECTION is a desktop-app concern (the picker writes
+            // the ids into the settings store). The standalone engine has no
+            // `--capture-device-id` flag yet, so `--record-capture-devices`
+            // enables the pipeline but records nothing until a device is selected
+            // — capture is fail-CLOSED and, unlike `--monitor-id` for displays,
+            // is NOT coupled to `--use-all-monitors`. (Follow-up: a
+            // `--capture-device-id` flag for headless per-device selection.)
+            capture_device_ids: Vec::new(),
             async_pii_redaction: self.async_pii_redaction,
             redact_agent_session_secrets: self.redact_agent_session_secrets,
             async_image_pii_redaction: self.async_image_pii_redaction,
@@ -1488,6 +1507,9 @@ impl RecordArgs {
         }
         if sources.use_pii_removal {
             settings.use_pii_removal = self.use_pii_removal;
+        }
+        if sources.record_capture_devices {
+            settings.record_capture_devices = self.record_capture_devices;
         }
         if sources.async_pii_redaction {
             settings.async_pii_redaction = self.async_pii_redaction;

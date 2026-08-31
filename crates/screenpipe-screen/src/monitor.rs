@@ -213,6 +213,38 @@ impl SafeMonitor {
         (*self.monitor_data).clone()
     }
 
+    /// Construct a synthetic monitor not backed by any OS display. Used for
+    /// capture-device (HDMI/UVC) pseudo-monitors so they appear in the same
+    /// monitor list and go through the same selection + recording dispatch as
+    /// real displays. Field init mirrors `make_test_monitor`.
+    pub fn new_virtual(id: u32, data: MonitorData) -> Self {
+        Self {
+            monitor_id: id,
+            monitor_data: Arc::new(data),
+            #[cfg(target_os = "macos")]
+            use_sck: false,
+            #[cfg(target_os = "macos")]
+            cached_sck: None,
+            #[cfg(target_os = "macos")]
+            cached_xcap: None,
+            // main added `prefer_xcap_fallback` to SafeMonitor after this
+            // feature was written; mirror make_test_monitor so the synthetic
+            // monitor stays a complete initializer on macOS.
+            #[cfg(target_os = "macos")]
+            prefer_xcap_fallback: Arc::new(AtomicBool::new(false)),
+            #[cfg(not(target_os = "macos"))]
+            cached_monitor_index: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(target_os = "linux")]
+            portal_capture: linux_portal::shared_portal_capture(),
+            #[cfg(target_os = "windows")]
+            persistent_capture: Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(target_os = "windows")]
+            persistent_capture_disabled: Arc::new(AtomicBool::new(false)),
+            #[cfg(target_os = "windows")]
+            persistent_capture_failures: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
     /// Capture a frame for a sustained recording loop.
     ///
     /// Most platforms use the same capture path as [`Self::capture_image`]. Windows
@@ -228,7 +260,15 @@ impl SafeMonitor {
 fn update_monitor_cache(monitors: &[SafeMonitor]) {
     let descriptions: Vec<String> = monitors
         .iter()
-        .map(|m| format!("Display {} ({}x{})", m.id(), m.width(), m.height()))
+        .map(|m| {
+            // A capture device carries its own "Capture: …" label; only real
+            // displays are described as "Display {id}".
+            if let Some(entry) = crate::dshow_capture::capture_device_entry(m.id()) {
+                format!("{} ({}x{})", entry.label, m.width(), m.height())
+            } else {
+                format!("Display {} ({}x{})", m.id(), m.width(), m.height())
+            }
+        })
         .collect();
     if let Ok(mut cache) = CACHED_MONITOR_DESCRIPTIONS.write() {
         *cache = descriptions;

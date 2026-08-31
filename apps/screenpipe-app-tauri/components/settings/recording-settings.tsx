@@ -54,6 +54,9 @@ export const screenSearchIndex: SettingsField[] = [
   { label: "Use it for", keywords: ["memory", "computer use", "automation", "agent", "skills"], conditional: true },
   { label: "Screen recording", keywords: ["screenshot", "pixels", "ocr", "jpeg", "capture"] },
   { label: "Use all monitors", keywords: ["monitor", "display"], conditional: true },
+  // conditional: only rendered when screen recording is on; the picker below it also needs the toggle enabled.
+  { label: "Record video capture devices", keywords: ["capture", "hdmi", "usb", "grabber", "console", "camera", "monitor"], conditional: true },
+  { label: "Capture devices", keywords: ["capture", "hdmi", "usb", "grabber", "device"], conditional: true },
   // conditional: monitor picker only renders when "Use all monitors" is off — paired right under that toggle.
   { label: "Monitors", conditional: true },
   { label: "Recording quality", keywords: ["fps", "quality"], conditional: true },
@@ -317,6 +320,7 @@ const SERVER_RESTART_SETTINGS = new Set<keyof SettingsStore>([
   "useChineseMirror",
   "enableWorkflowEvents",
   "disableSnapshotCompaction",
+  "recordCaptureDevices",
 ]);
 
 type AudioPipelineSnapshot = {
@@ -1783,6 +1787,27 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
   const [availableMonitors, setAvailableMonitors] = useState<MonitorDevice[]>(
     []
   );
+  // Split real displays from capture devices (HDMI/UVC grabbers surfaced as
+  // pseudo-monitors). They render in separate sections so capture devices stay
+  // visible even when "use all monitors" hides the monitor picker.
+  const realMonitors = useMemo(
+    () => availableMonitors.filter((m) => !m.isCapture),
+    [availableMonitors]
+  );
+  const captureMonitors = useMemo(
+    () => availableMonitors.filter((m) => m.isCapture),
+    [availableMonitors]
+  );
+  // macOS camera-permission status for the capture-device feature (HDMI/USB
+  // grabbers enumerate as AVFoundation camera devices; other platforms report
+  // "notNeeded"). null until checked — treated as OK so no banner flashes.
+  const [captureCameraStatus, setCaptureCameraStatus] = useState<string | null>(
+    null
+  );
+  const captureCameraOk =
+    captureCameraStatus === null ||
+    captureCameraStatus === "granted" ||
+    captureCameraStatus === "notNeeded";
   const [availableAudioDevices, setAvailableAudioDevices] = useState<
     AudioDeviceInfo[]
   >([]);
@@ -2239,22 +2264,69 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
           return lastUnderscore > 0 ? sid.substring(0, lastUnderscore) : sid;
         };
 
+        // The DISPLAY allowlist matches only real monitors — capture devices
+        // have their own selection (captureDeviceIds). Restricting the finder to
+        // non-capture monitors also strips any legacy capture id that was
+        // (mis)stored in monitorIds before captures had a separate list.
+        const realMons = monitors.filter((m) => !m.isCapture);
+        const captureMons = monitors.filter((m) => m.isCapture);
+
         const findMonitorForStoredId = (id: string) => {
           if (id === "default") return null;
           // 1. Exact stable ID match
-          const exact = monitors.find((m) => m.stableId === id);
+          const exact = realMons.find((m) => m.stableId === id);
           if (exact) return exact;
           // 2. Legacy numeric ID match
-          const byNumeric = monitors.find((m) => m.id.toString() === id);
+          const byNumeric = realMons.find((m) => m.id.toString() === id);
           if (byNumeric) return byNumeric;
           // 3. Fuzzy: name+resolution match (position may have changed across reboot)
           const prefix = stableIdPrefix(id);
           if (prefix !== id) {
-            const byPrefix = monitors.find((m) => stableIdPrefix(m.stableId) === prefix);
+            const byPrefix = realMons.find((m) => stableIdPrefix(m.stableId) === prefix);
             if (byPrefix) return byPrefix;
           }
           return null;
         };
+
+        // Migrate any legacy capture id sitting in monitorIds into
+        // captureDeviceIds (keyed by the resolution-independent numeric id) so a
+        // capture selection is never left in the display allowlist.
+        // Strip BOTH the trailing position and the resolution off a capture
+        // stableId to get its device-name key ("Capture: X_WxH_x,y" -> "Capture: X").
+        const captureNameKey = (sid: string) =>
+          stableIdPrefix(sid).replace(/_\d+x\d+$/, "");
+        const findCaptureForStoredId = (id: string) => {
+          if (id === "default") return null;
+          const direct = captureMons.find(
+            (m) => m.stableId === id || m.id.toString() === id
+          );
+          if (direct) return direct;
+          const prefix = stableIdPrefix(id);
+          if (prefix !== id) {
+            const byPrefix = captureMons.find(
+              (m) => stableIdPrefix(m.stableId) === prefix
+            );
+            if (byPrefix) return byPrefix;
+          }
+          // Name-only fallback: a scaler grabber re-negotiates its resolution, so
+          // a legacy resolution-bearing stableId won't match by prefix (which
+          // keeps the resolution). Match on the device-name portion, but ONLY
+          // when exactly one capture device has that name, so two identical-model
+          // grabbers are never confused.
+          const nameKey = captureNameKey(id);
+          const sameName = captureMons.filter((m) => m.name === nameKey);
+          if (sameName.length === 1) return sameName[0];
+          return null;
+        };
+        const migratedCaptureIds = settings.monitorIds
+          .map((id) => findCaptureForStoredId(id))
+          .filter((m): m is MonitorDevice => m !== null)
+          .map((m) => m.id.toString());
+        // Don't prune absent capture devices: a grabber is often unplugged and
+        // its numeric id is stable across replug, so the selection should stick.
+        const updatedCaptureDeviceIds = Array.from(
+          new Set([...(settings.captureDeviceIds ?? []), ...migratedCaptureIds])
+        );
 
         let updatedMonitorIds = settings.monitorIds.filter((id) =>
           id === "default" || findMonitorForStoredId(id) !== null
@@ -2268,8 +2340,10 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
         });
 
         if (updatedMonitorIds.length === 0) {
-          const defaultMonitor = monitors.find((monitor) => monitor.isDefault);
-          updatedMonitorIds = [defaultMonitor ? defaultMonitor.stableId : monitors[0].stableId];
+          const defaultMonitor = realMons.find((monitor) => monitor.isDefault);
+          updatedMonitorIds = [
+            defaultMonitor ? defaultMonitor.stableId : realMons[0]?.stableId ?? "default",
+          ];
         }
 
         // Update audio devices
@@ -2294,6 +2368,7 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
         handleSettingsChange(
           {
             monitorIds: updatedMonitorIds,
+            captureDeviceIds: updatedCaptureDeviceIds,
             audioDevices: updatedAudioDevices,
           },
           false
@@ -2307,6 +2382,26 @@ export function RecordingSettings({ section }: { section: RecordingSettingsSecti
     loadDevices();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Check camera permission whenever capture-device recording is enabled. macOS
+  // requires it (capture grabbers are AVFoundation camera devices); every other
+  // platform reports "notNeeded" so the banner never shows off-macOS.
+  useEffect(() => {
+    if (!(settings.recordCaptureDevices ?? false)) {
+      setCaptureCameraStatus(null);
+      return;
+    }
+    let cancelled = false;
+    commands
+      .checkPermission("camera")
+      .then((s) => {
+        if (!cancelled) setCaptureCameraStatus(s);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.recordCaptureDevices]);
 
   // Enhanced validation for specific fields
   const validateDeepgramApiKey = useCallback((apiKey: string): FieldValidationResult => {
@@ -3925,6 +4020,122 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
           </Card>
         )}
 
+        {/* Record video capture devices — HDMI/USB grabbers surfaced as
+            pseudo-monitors. Off by default; virtual cameras are skipped. */}
+        {screenshotImagesEnabled && (
+          <Card className="border-border bg-card">
+            <CardContent className="px-3 py-2.5">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-2.5">
+                  <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <div>
+                    <h3 className="text-sm font-medium text-foreground">Record video capture devices</h3>
+                    <p className="text-xs text-muted-foreground">Also record HDMI/USB capture cards (grabbers) as if they were monitors — e.g. a game console, camera, or another computer&apos;s screen. With &quot;use all monitors&quot; on, every capture device records; otherwise pick them below. Virtual cameras (OBS, NVIDIA Broadcast) are skipped.</p>
+                  </div>
+                </div>
+                <Switch id="recordCaptureDevices" checked={settings.recordCaptureDevices ?? false} onCheckedChange={(checked) => handleSettingsChange({ recordCaptureDevices: checked }, true)} />
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Capture devices — dedicated section, visible whenever the toggle is
+            on and INDEPENDENT of "use all monitors". This is the fix for capture
+            devices vanishing from Settings once all-monitors mode is enabled. */}
+        {screenshotImagesEnabled && (settings.recordCaptureDevices ?? false) && (
+          <Card className="border-border bg-card overflow-hidden">
+            <CardContent className="px-3 py-2.5">
+              <div className="flex items-center space-x-2.5 mb-3">
+                <Monitor className="h-4 w-4 text-muted-foreground shrink-0" />
+                <h3 className="text-sm font-medium text-foreground">Capture devices</h3>
+              </div>
+
+              {!captureCameraOk && (
+                <div className="mb-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-2 text-xs text-foreground">
+                  macOS needs camera access to record capture devices — HDMI/USB grabbers appear to macOS as camera devices. Nothing is recorded until you grant it and pick a device.
+                  <button
+                    type="button"
+                    className="ml-2 font-medium underline underline-offset-2"
+                    onClick={async () => {
+                      await commands.requestPermission("camera");
+                      try {
+                        setCaptureCameraStatus(await commands.checkPermission("camera"));
+                      } catch {
+                        /* leave status unchanged on error */
+                      }
+                    }}
+                  >
+                    Grant camera access
+                  </button>
+                </div>
+              )}
+
+              {captureMonitors.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-1">
+                  No capture devices detected. Connect an HDMI/USB grabber, then reopen this settings panel to refresh the list. Virtual cameras (OBS, NVIDIA Broadcast) are skipped.
+                </p>
+              ) : (
+                <>
+                  <div className="flex flex-wrap items-end justify-center gap-6 py-2">
+                    {captureMonitors.map((monitor) => {
+                      // Capture devices key on the resolution-independent numeric
+                      // id (their captureDeviceIds set), NOT the display allowlist
+                      // or the resolution-bearing stableId — so a probed-mode
+                      // change never orphans the selection. Independent of the
+                      // "use all monitors" DISPLAY setting: capture recording is
+                      // always the explicit picker (fail-closed), never all-on.
+                      const deviceId = String(monitor.id);
+                      const captureIds = settings.captureDeviceIds ?? [];
+                      const isSelected = captureIds.includes(deviceId);
+                      const deviceLabel = monitor.name.replace(/^Capture:\s*/, "");
+                      return (
+                        <button
+                          key={monitor.stableId}
+                          type="button"
+                          aria-pressed={isSelected}
+                          aria-label={`${isSelected ? "Stop recording" : "Record"} capture device ${deviceLabel}`}
+                          className="flex flex-col items-center gap-1.5 group"
+                          onClick={() => {
+                            const current = settings.captureDeviceIds ?? [];
+                            const newIds = current.includes(deviceId)
+                              ? current.filter((id) => id !== deviceId)
+                              : [...current, deviceId];
+                            handleSettingsChange({ captureDeviceIds: newIds }, true);
+                          }}
+                        >
+                          <svg width="80" height="56" viewBox="0 0 80 56" fill="none" className={cn("transition-opacity", isSelected ? "opacity-100" : "opacity-40 group-hover:opacity-60")}>
+                            <rect x="4" y="2" width="72" height="42" rx="3" className="fill-muted stroke-border" strokeWidth="1.5" />
+                            <rect x="8" y="6" width="64" height="34" rx="1" className={cn(isSelected ? "fill-foreground/10" : "fill-background")} />
+                            <path d="M30 44 L30 50 L50 50 L50 44" className="stroke-border" strokeWidth="1.5" fill="none" />
+                            <line x1="24" y1="50" x2="56" y2="50" className="stroke-border" strokeWidth="1.5" strokeLinecap="round" />
+                            {isSelected && (
+                              <path d="M32 20 L37 25 L48 14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-foreground" />
+                            )}
+                          </svg>
+                          <div className="text-center">
+                            <span className={cn("text-[11px] font-medium block", isSelected ? "text-foreground" : "text-muted-foreground")}>
+                              {deviceLabel}
+                            </span>
+                            <p className="text-[10px] text-muted-foreground">{monitor.width}x{monitor.height}</p>
+                            {monitor.isCamera && (
+                              <span className="mt-0.5 inline-block rounded bg-muted px-1 py-px text-[9px] uppercase tracking-wide text-muted-foreground" title="Looks like a webcam, not an HDMI/USB capture card">
+                                camera
+                              </span>
+                            )}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <p className="text-[10px] text-muted-foreground text-center mt-1">
+                    Tap a device to record it. Only devices you select here are recorded.
+                  </p>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
+
         {/* Monitor Selection — paired directly under "Use all monitors" so
             the picker it reveals sits next to the toggle that controls it,
             not buried below the quality/frequency/HD cards. */}
@@ -3961,7 +4172,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                   </span>
                 </button>
 
-                {availableMonitors.map((monitor) => {
+                {realMonitors.map((monitor) => {
                   const isSelected = settings.monitorIds.includes(monitor.stableId);
                   return (
                     <button

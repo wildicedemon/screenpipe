@@ -804,6 +804,8 @@ let DEFAULT_SETTINGS: Settings = {
 			remoteControlPolicy: cloneLocalDesktopRemotePolicy(),
 			semanticContextMode: "memory",
 			useAllMonitors: true,
+				recordCaptureDevices: false,
+			captureDeviceIds: [],
 			chatHistory: {
 				conversations: [],
 				activeConversationId: null,

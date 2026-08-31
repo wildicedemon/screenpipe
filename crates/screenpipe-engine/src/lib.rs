@@ -42,6 +42,7 @@ mod atomic_file;
 pub mod auth_key;
 mod auto_destruct;
 pub mod calendar_speaker_id;
+pub mod capture_device;
 mod capture_exclusions;
 pub mod cli;
 pub mod cli_reminder;

@@ -157,6 +157,14 @@ impl SafeMonitor {
 
 /// List monitors with detailed error information (permission denied vs no monitors)
 pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, MonitorListError> {
+    // Capture-device pseudo-monitors (HDMI/UVC grabbers) surfaced alongside the
+    // real xcap displays so they flow through the same selection + recording
+    // path. Read from the registry populated by `refresh_capture_devices`.
+    let capture_monitors: Vec<SafeMonitor> = crate::dshow_capture::capture_device_monitors()
+        .into_iter()
+        .map(|(id, data)| SafeMonitor::new_virtual(id, data))
+        .collect();
+
     let result: std::result::Result<Vec<SafeMonitor>, MonitorListError> =
         tokio::task::spawn_blocking(|| match XcapMonitor::all() {
             Ok(monitors) if monitors.is_empty() => Err(MonitorListError::NoMonitorsFound),
@@ -166,11 +174,29 @@ pub async fn list_monitors_detailed() -> std::result::Result<Vec<SafeMonitor>, M
         .await
         .unwrap_or(Err(MonitorListError::Other("Task panicked".to_string())));
 
+    // Publish the portal/PipeWire layout from the REAL displays only — virtual
+    // capture devices are grabbed via ffmpeg v4l2, not PipeWire, so they must
+    // not pollute the portal's monitor-geometry map. Then append capture devices
+    // so they appear in the monitor list + cache, mirroring Windows. If xcap
+    // found no monitors but we have capture devices, surface those instead of
+    // erroring so they can still be recorded.
+    let result = match result {
+        Ok(monitors) => {
+            if let Some(first) = monitors.first() {
+                first.portal_capture.set_monitor_layout(&monitors);
+            }
+            let mut monitors = monitors;
+            monitors.extend(capture_monitors);
+            Ok(monitors)
+        }
+        Err(MonitorListError::NoMonitorsFound) if !capture_monitors.is_empty() => {
+            Ok(capture_monitors)
+        }
+        Err(e) => Err(e),
+    };
+
     if let Ok(monitors) = &result {
         update_monitor_cache(monitors);
-        if let Some(first) = monitors.first() {
-            first.portal_capture.set_monitor_layout(monitors);
-        }
     }
     result
 }
@@ -193,6 +219,20 @@ pub async fn get_default_monitor() -> Option<SafeMonitor> {
 }
 
 pub async fn get_monitor_by_id(id: u32) -> Option<SafeMonitor> {
+    // Capture-device pseudo-monitors resolve from the registry, not xcap.
+    if let Some(e) = crate::dshow_capture::capture_device_entry(id) {
+        return Some(SafeMonitor::new_virtual(
+            id,
+            MonitorData {
+                width: e.width,
+                height: e.height,
+                x: 0,
+                y: 0,
+                name: e.label,
+                is_primary: false,
+            },
+        ));
+    }
     tokio::task::spawn_blocking(move || match XcapMonitor::all() {
         Ok(monitors) => {
             let monitor_count = monitors.len();

@@ -45,6 +45,9 @@ pub(crate) struct VisionDeviceStatusEntry {
     pub active: bool,
     /// Explicitly paused by the user (won't be auto-restarted by the watcher).
     pub user_disabled: bool,
+    /// True when this pseudo-monitor is an external video capture device
+    /// (HDMI/UVC grabber) rather than a real display.
+    pub is_capture: bool,
 }
 
 /// Resolve the shared VisionManager or return a 409 when vision capture isn't
@@ -138,11 +141,20 @@ pub(crate) async fn vision_device_status(
         .filter(|monitor| vision_manager.is_monitor_allowed(monitor))
         .map(|monitor| {
             let id = monitor.id();
+            let is_capture = screenpipe_screen::dshow_capture::capture_device_entry(id).is_some();
+            // A capture device carries its own descriptive name ("Capture: …");
+            // only real displays use the "Display {id} (WxH)" label.
+            let name = if is_capture {
+                monitor.name().to_string()
+            } else {
+                format!("Display {} ({}x{})", id, monitor.width(), monitor.height())
+            };
             VisionDeviceStatusEntry {
                 id,
-                name: format!("Display {} ({}x{})", id, monitor.width(), monitor.height()),
+                name,
                 active: active.contains(&id),
                 user_disabled: user_disabled.contains(&id),
+                is_capture,
             }
         })
         .collect();

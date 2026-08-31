@@ -4,6 +4,14 @@
 <dict>
     <key>com.apple.security.device.audio-input</key>
     <true/>
+
+    <!-- Camera access. Required under hardened runtime for the optional
+         capture-device feature: external HDMI/USB grabbers enumerate as
+         AVFoundation *camera* devices, so without this macOS denies the bundled
+         ffmpeg's open before TCC is even consulted and no prompt fires. The
+         ffmpeg sidecar runs as a child of the app and inherits this. -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
     <key>com.apple.security.files.user-selected.read-write</key>
     <true/>
 

@@ -42,6 +42,18 @@ pub struct VisionManagerConfig {
     pub included_urls: Vec<DomainRule>,
     pub vision_metrics: Arc<PipelineMetrics>,
     pub use_pii_removal: bool,
+    /// Mitsukeru fork: opt-in gate for recording video capture devices
+    /// (HDMI/UVC grabbers) that enumerate as pseudo-monitors. When false
+    /// (the default) capture devices still appear in the monitor list but
+    /// their recording is skipped in `start_monitor`. Visibility is never
+    /// affected — only recording.
+    pub record_capture_devices: bool,
+    /// Mitsukeru fork: numeric ids of the capture devices the user selected to
+    /// record, kept SEPARATE from `monitor_ids`. Empty means record NO capture
+    /// device (fail-closed), unlike `monitor_ids` where empty defers to
+    /// `use_all_monitors` — so a capture selection never widens or narrows
+    /// display recording. Only consulted when `record_capture_devices` is on.
+    pub capture_device_ids: Vec<String>,
     /// Stable IDs of monitors the user selected for recording (e.g. "MSI G271_1920x1080_2002,-1080").
     /// Empty means no explicit selection — honour `use_all_monitors` instead.
     pub monitor_ids: Vec<String>,
@@ -176,6 +188,32 @@ pub struct VisionManager {
     /// Health reads this cached value without introducing CoreGraphics calls
     /// into the 1 Hz endpoint.
     monitor_capture_expected: Arc<AtomicBool>,
+}
+
+/// Decide whether a capture-device pseudo-monitor should record. Pure (no
+/// registry / SafeMonitor dependency) so the fail-closed selection logic can be
+/// unit-tested directly, and shared by `is_monitor_allowed` and the
+/// `start_monitor` capture dispatch so there is one source of truth.
+///
+/// Fail-CLOSED and fully INDEPENDENT of the display allowlist: a capture device
+/// records only when the feature is on AND it is explicitly selected in
+/// `capture_device_ids`. An empty selection records NONE. Deliberately does NOT
+/// consult `use_all_monitors` — that is a DISPLAY setting, and coupling capture
+/// to it made `--monitor-id` silently disable all capture recording while the
+/// desktop default (`use_all_monitors` on) recorded every capture device incl.
+/// webcams with no way to opt one out. A capture selection never widens/narrows
+/// display recording and no display setting widens/narrows capture recording.
+/// Matches on the resolution-independent numeric id so a scaler grabber
+/// re-negotiating its output size can't orphan a selection.
+pub(crate) fn capture_device_allowed(
+    record_capture_devices: bool,
+    capture_device_ids: &[String],
+    monitor_id: u32,
+) -> bool {
+    record_capture_devices
+        && capture_device_ids
+            .iter()
+            .any(|id| *id == monitor_id.to_string())
 }
 
 impl VisionManager {
@@ -313,10 +351,30 @@ impl VisionManager {
             .unwrap_or(false)
     }
 
+    /// Whether capture-device (HDMI/UVC grabber) recording is enabled. The
+    /// monitor watcher reads this to decide whether to hot-plug-refresh the
+    /// capture registry on the reconcile hot path — skipped entirely when off,
+    /// so default / feature-off users pay nothing.
+    pub(crate) fn record_capture_devices(&self) -> bool {
+        self.config.record_capture_devices
+    }
+
     /// Check whether a monitor is allowed by the user's monitor filter settings.
     /// Uses prefix matching (name + resolution) so that position changes after
     /// reconnect don't break the filter.
     pub fn is_monitor_allowed(&self, monitor: &screenpipe_screen::monitor::SafeMonitor) -> bool {
+        // Capture-device pseudo-monitors have their OWN opt-in and selection,
+        // kept entirely separate from the display allowlist: a capture selection
+        // must never broaden or narrow display recording, and the display
+        // stale-allowlist fallback below must never reach them. Handled first so
+        // a capture device never falls through to the display logic.
+        if screenpipe_screen::dshow_capture::capture_device_entry(monitor.id()).is_some() {
+            return capture_device_allowed(
+                self.config.record_capture_devices,
+                &self.config.capture_device_ids,
+                monitor.id(),
+            );
+        }
         if self
             .stale_allowlist_fallback
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -341,6 +399,109 @@ impl VisionManager {
         })
     }
 
+    /// Mitsukeru fork: spawn the ffmpeg capture loop for one capture device
+    /// selected via the normal monitor path. Returns the loop's JoinHandle so it
+    /// is tracked in `recording_tasks` exactly like a real monitor's capture
+    /// task (and torn down the same way in `stop_monitor`). Cadence follows the
+    /// same interval settings the event-driven monitor loop honors — no
+    /// hardcoded framerate — and frames index through `paired_capture` with the
+    /// same dedup real monitors use. Cross-platform: the ffmpeg input backend is
+    /// selected per-OS from `entry.input` inside `DshowSource`.
+    async fn start_capture_device(
+        &self,
+        monitor_id: u32,
+        entry: screenpipe_screen::dshow_capture::CaptureDeviceEntry,
+    ) -> tokio::task::JoinHandle<()> {
+        use crate::capture_device::{capture_device_loop, CaptureCadence, CaptureLoopConfig};
+        use crate::video::{video_quality_to_jpeg_quality, video_quality_to_max_snapshot_width};
+        use screenpipe_screen::dshow_capture::DshowSourceConfig;
+        use screenpipe_screen::snapshot_writer::SnapshotWriter;
+
+        let cadence = CaptureCadence {
+            min_capture_interval_ms: self.config.min_capture_interval_ms.unwrap_or(200),
+            idle_capture_interval_ms: self.config.idle_capture_interval_ms.unwrap_or(30_000),
+            visual_check_interval_ms: self.config.visual_check_interval_ms.unwrap_or(3_000),
+            visual_change_threshold: self.config.visual_change_threshold.unwrap_or(0.02),
+        };
+
+        let device_name = format!(
+            "capture_{}",
+            entry
+                .name
+                .chars()
+                .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                .collect::<String>()
+        );
+
+        // Open the device at the exact resolution `probe_best_mode` chose, by
+        // pinning it as the input `-video_size` (only the frame size is pinned;
+        // fps/pixel-format stay auto-negotiated). This is essential on Windows:
+        // with no input size ffmpeg opens the card at its DEFAULT mode, which on
+        // some USB grabbers is a broken max-res upscale that arrives diagonally
+        // SHEARED — and the output scale below would then only shrink that
+        // sheared frame. Probing already skips the broken max mode (it prefers
+        // the highest full-rate mode), so pinning the input to it makes the card
+        // deliver clean frames (verified: this card shears at its 2160x3840
+        // default but is pristine at the probed 1440x2560). The aspect-preserving
+        // output scale stays as a safety net for a device that ignores the
+        // request and delivers another size.
+        //
+        // Pin ONLY a real probed size. When probing found nothing (`mode_probed`
+        // false — always on macOS, and on any card whose mode list won't parse)
+        // the width/height here is a nominal guess; pinning it would make a
+        // strict backend refuse to open a device whose real mode differs, so we
+        // leave the input unpinned and let the card open at its own default.
+        let input_video_size = if entry.mode_probed {
+            Some((entry.width, entry.height))
+        } else {
+            None
+        };
+
+        let cfg = CaptureLoopConfig {
+            source: DshowSourceConfig {
+                input: entry.input.clone(),
+                input_video_size,
+                input_framerate: None,
+                input_pixel_format: None,
+                output_width: entry.width,
+                output_height: entry.height,
+                output_fps: None, // derived from cadence inside the loop
+                extra_video_filter: None,
+            },
+            device_name,
+            label: entry.label.clone(),
+            monitor_id,
+        };
+
+        let snapshot_writer = SnapshotWriter::new(
+            format!("{}/data", self.config.output_path),
+            video_quality_to_jpeg_quality(&self.config.video_quality),
+            video_quality_to_max_snapshot_width(&self.config.video_quality),
+        );
+
+        let db = self.db.clone();
+        let languages = self.config.languages.clone();
+        let use_pii_removal = self.config.use_pii_removal;
+        let label = cfg.label.clone();
+        let vision_metrics = self.config.vision_metrics.clone();
+
+        self.vision_handle.spawn(async move {
+            if let Err(e) = capture_device_loop(
+                db,
+                snapshot_writer,
+                cfg,
+                cadence,
+                languages,
+                use_pii_removal,
+                vision_metrics,
+            )
+            .await
+            {
+                tracing::error!("capture-device loop '{label}' exited with error: {e:#}");
+            }
+        })
+    }
+
     /// Start recording on all currently connected monitors
     pub async fn start(&self) -> Result<()> {
         let mut status = self.status.write().await;
@@ -353,6 +514,11 @@ impl VisionManager {
         *status = VisionManagerStatus::Running;
         drop(status);
         self.set_expected_monitors(std::iter::empty());
+
+        // Mitsukeru fork: detect external HDMI / UVC capture cards and register
+        // them so they enumerate as pseudo-monitors below. MUST run before the
+        // monitor enumeration loop so `list_monitors()` includes them.
+        screenpipe_screen::dshow_capture::refresh_capture_devices().await;
 
         // Get all monitors and start recording on each (filtered by user selection)
         let monitors = list_monitors().await;
@@ -562,6 +728,47 @@ impl VisionManager {
         // Check if already recording
         if self.recording_tasks.contains_key(&monitor_id) {
             debug!("Monitor {} is already recording", monitor_id);
+            return Ok(());
+        }
+
+        // If this monitor id is a capture device (HDMI/UVC grabber), record it
+        // via the ffmpeg capture loop instead of the normal screen-capture path.
+        // `monitor` and `monitor_id` are already in scope from
+        // start_monitor_handle's args — main deliberately avoids re-enumerating
+        // by id here (it caused an unbounded second SCShareableContent callback
+        // during recovery), so unlike the original feature commit we do NOT
+        // re-look-up the monitor.
+        if let Some(entry) = screenpipe_screen::dshow_capture::capture_device_entry(monitor_id) {
+            // Capture devices are gated by their OWN opt-in + selection (see
+            // is_monitor_allowed / capture_device_allowed). Re-check here so any
+            // caller reaching start_monitor directly — watchdog recovery, an
+            // explicit start — still honors the selection rather than starting
+            // every device.
+            let allowed = capture_device_allowed(
+                self.config.record_capture_devices,
+                &self.config.capture_device_ids,
+                monitor_id,
+            );
+            // A capture device's only output is the JPEG snapshot and its OCR —
+            // an external HDMI/UVC feed has no accessibility tree — so with
+            // screenshots disabled it would produce nothing. Skip it entirely
+            // instead of spinning ffmpeg for no data (unlike a real monitor,
+            // whose a11y walk still yields text when screenshots are off).
+            if !allowed || self.config.disable_screenshots {
+                tracing::debug!(
+                    "capture device '{}' not recorded (allowed={}, screenshots_disabled={})",
+                    entry.label,
+                    allowed,
+                    self.config.disable_screenshots
+                );
+                return Ok(());
+            }
+            info!(
+                "starting capture-device recording: '{}' ({}x{})",
+                entry.label, entry.width, entry.height
+            );
+            let handle = self.start_capture_device(monitor_id, entry).await;
+            self.recording_tasks.insert(monitor_id, handle);
             return Ok(());
         }
 
@@ -1011,6 +1218,25 @@ mod tests {
     use screenpipe_db::DatabaseManager;
     use screenpipe_screen::PipelineMetrics;
 
+    #[test]
+    fn capture_device_allowed_is_fail_closed_and_isolated_from_displays() {
+        let id: u32 = 0xF000_0001;
+        let sel = vec![id.to_string()];
+        let other = vec![0xF000_0002u32.to_string()]; // a genuinely different capture id
+
+        // Master switch off → never record, regardless of selection.
+        assert!(!capture_device_allowed(false, &sel, id));
+
+        // Enabled + EMPTY selection → fail CLOSED (record none). Unlike the
+        // display allowlist there is no use_all_monitors path that turns an empty
+        // selection into "all" — capture is purely the explicit list.
+        assert!(!capture_device_allowed(true, &[], id));
+
+        // Enabled + explicit selection → only the chosen id records.
+        assert!(capture_device_allowed(true, &sel, id));
+        assert!(!capture_device_allowed(true, &other, id));
+    }
+
     async fn make_vm_with_options(
         monitor_ids: Vec<String>,
         enable_semantic_context: bool,
@@ -1028,6 +1254,8 @@ mod tests {
             included_urls: vec![],
             vision_metrics: Arc::new(PipelineMetrics::default()),
             use_pii_removal: false,
+            record_capture_devices: false,
+            capture_device_ids: vec![],
             monitor_ids,
             use_all_monitors: false,
             ignore_incognito_windows: false,

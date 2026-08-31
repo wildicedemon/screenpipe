@@ -639,6 +639,9 @@ pub struct MonitorInfo {
     pub width: u32,
     pub height: u32,
     pub is_default: bool,
+    /// True when this pseudo-monitor is an external video capture device
+    /// (HDMI/UVC grabber) rather than a real display.
+    pub is_capture: bool,
 }
 
 #[derive(Serialize, OaSchema, Deserialize, Clone)]
@@ -2047,6 +2050,10 @@ pub async fn api_list_monitors(
     let monitors = list_monitors().await;
     let monitor_info = futures::future::join_all(monitors.into_iter().map(|monitor| async move {
         let monitor_id = monitor.id();
+        // Computed from the id independently of the get_monitor_by_id result so
+        // both arms report it consistently.
+        let is_capture =
+            screenpipe_screen::dshow_capture::capture_device_entry(monitor_id).is_some();
         match get_monitor_by_id(monitor_id).await {
             Some(monitor) => MonitorInfo {
                 id: monitor.id(),
@@ -2055,6 +2062,7 @@ pub async fn api_list_monitors(
                 width: monitor.width(),
                 height: monitor.height(),
                 is_default: monitor.is_primary(),
+                is_capture,
             },
             None => MonitorInfo {
                 id: monitor_id,
@@ -2063,6 +2071,7 @@ pub async fn api_list_monitors(
                 width: 0,
                 height: 0,
                 is_default: false,
+                is_capture,
             },
         }
     }))

@@ -3321,7 +3321,20 @@ export type ManagedTeamSkillReceipt = { artifact_id: string; version: number; re
  */
 status: string; detail?: string | null }
 export type MeetingExportSummary = { job_id: string; output_path: string; frame_count: number; audio_chunk_count: number; duration_secs: number; file_size_bytes: number }
-export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number }
+export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number;
+/**
+ * True for a video capture device (HDMI/UVC grabber) surfaced as a
+ * pseudo-monitor, as opposed to a real display. Lets the settings UI badge
+ * it and gate it behind the "record capture devices" toggle.
+ */
+isCapture: boolean;
+/**
+ * Best-effort: true when a capture device looks like a webcam / built-in
+ * camera rather than an HDMI/UVC grabber. Informational only — lets the
+ * picker badge cameras distinctly; selection is unaffected. Always false
+ * for real displays.
+ */
+isCamera: boolean }
 export type NotificationActionEvent = { actionType: string | null; rawJson: string; payload: JsonValue }
 export type OAuthInstanceInfo = { instance: string | null; display_name: string | null }
 export type OAuthStatus = { connected: boolean; display_name: string | null;
@@ -3332,7 +3345,14 @@ export type OAuthStatus = { connected: boolean; display_name: string | null;
  * since the user can't fix it by reconnecting in the broken bundle.
  */
 needs_attention?: boolean }
-export type OSPermission = "screenRecording" | "microphone" | "accessibility" | "automation" | "inputMonitoring" | "calendar"
+export type OSPermission = "screenRecording" | "microphone" |
+/**
+ * macOS Camera (TCC). Needed only for the optional capture-device feature —
+ * external HDMI/USB grabbers enumerate as AVFoundation camera devices —
+ * so it is requested lazily when that feature is enabled, NOT part of the
+ * standard onboarding permission set.
+ */
+"camera" | "accessibility" | "automation" | "inputMonitoring" | "calendar"
 export type OSPermissionStatus = "notNeeded" | "empty" | "granted" | "restartRequired" | "denied"
 export type OSPermissionsCheck = { screenRecording: OSPermissionStatus; microphone: OSPermissionStatus; accessibility: OSPermissionStatus }
 export type OnboardingStore = { isCompleted: boolean; completedAt: string | null;
@@ -3943,6 +3963,21 @@ languages: string[];
  * Redact personally identifiable information from transcriptions.
  */
 usePiiRemoval: boolean;
+/**
+ * Mitsukeru fork: opt-in gate for recording video capture devices
+ * (HDMI/UVC grabbers) that enumerate as pseudo-monitors. Off by
+ * default — devices stay visible in the monitor picker but their
+ * recording is skipped unless this is enabled.
+ */
+recordCaptureDevices?: boolean;
+/**
+ * Mitsukeru fork: numeric ids of the capture devices the user chose to
+ * record, kept SEPARATE from `monitor_ids`. Empty means record NO capture
+ * device (unlike `monitor_ids`, where empty defers to `use_all_monitors`),
+ * so a capture selection never widens or narrows display recording. Only
+ * consulted when `record_capture_devices` is on.
+ */
+captureDeviceIds?: string[];
 /**
  * Enable the async PII reconciliation worker. When `true`, a
  * background task runs after capture and OVERWRITES PII in the

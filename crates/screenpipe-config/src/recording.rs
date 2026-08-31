@@ -618,6 +618,25 @@ pub struct RecordingSettings {
     #[serde(rename = "usePiiRemoval")]
     pub use_pii_removal: bool,
 
+    /// Mitsukeru fork: opt-in gate for recording video capture devices
+    /// (HDMI/UVC grabbers) that enumerate as pseudo-monitors. Off by
+    /// default — devices stay visible in the monitor picker but their
+    /// recording is skipped unless this is enabled.
+    #[serde(rename = "recordCaptureDevices", default)]
+    pub record_capture_devices: bool,
+
+    /// Mitsukeru fork: numeric ids of the capture devices the user chose to
+    /// record, kept SEPARATE from `monitor_ids`. Empty means record NO capture
+    /// device (unlike `monitor_ids`, where empty defers to `use_all_monitors`),
+    /// so a capture selection never widens or narrows display recording. Only
+    /// consulted when `record_capture_devices` is on.
+    #[serde(
+        rename = "captureDeviceIds",
+        default,
+        deserialize_with = "deserialize_monitor_ids"
+    )]
+    pub capture_device_ids: Vec<String>,
+
     /// Enable the async PII reconciliation worker. When `true`, a
     /// background task runs after capture and OVERWRITES PII in the
     /// source columns of `ocr_text`, `audio_transcriptions`,
@@ -929,6 +948,8 @@ impl Default for RecordingSettings {
             record_while_locked: false,
             languages: vec![],
             use_pii_removal: false,
+            record_capture_devices: false,
+            capture_device_ids: vec![],
             async_pii_redaction: false,
             redact_agent_session_secrets: false,
             async_image_pii_redaction: false,

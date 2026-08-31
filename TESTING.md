@@ -112,6 +112,21 @@ commits: `28e5c247`
 - [ ] **queue stats after unplug** — check logs. no queue stats for disconnected monitor after disconnect.
 - [ ] **--use-all-monitors flag override** — Verify that the `--use-all-monitors` CLI flag correctly overrides tier-based defaults (e.g., if a tier defaults to a single monitor, the flag should still enable all monitors). (`bd5b94328`)
 
+### 3.1 capture devices (HDMI/USB grabbers)
+
+Off by default; enable "record video capture devices" in Settings. Run per-OS — capture enumeration/spawn is `#[cfg]`-split (DirectShow / AVFoundation / V4L2) and CI compiles but never exercises a real device.
+
+- [ ] **enumerate + record (all 3 OS)** — connect an HDMI/USB grabber with a live source. It appears under Settings → "Capture devices" (not in the display picker). Select it; a JPEG snapshot is written and OCR'd under its own `device_name`. Virtual cameras (OBS/NVIDIA Broadcast) are NOT listed.
+- [ ] **feature off records nothing** — with the toggle off, the grabber still appears in the list but no capture ffmpeg spawns and no frames are written. With "use all monitors" on and the toggle off, still nothing.
+- [ ] **selection is isolated from displays** — selecting/deselecting a capture device never changes which real monitors record, and vice-versa. Empty capture selection (toggle on, use-all-monitors off) records NO capture device.
+- [ ] **hot-plug** — plug a grabber while recording: it starts within ~20s. Unplug it: its loop stops and ffmpeg is not relaunched in a loop (watch CPU/battery — the old bug respawned every ≤60s forever).
+- [ ] **macOS camera permission** — on a signed/notarized build, enabling the feature shows the camera-permission banner in the capture section and the OS camera prompt; after granting, capture works. Denying leaves a clear banner, not a silent respawn loop. (`NSCameraUsageDescription` + `com.apple.security.device.camera` must be present; verify on the signed path, dev builds can't prove TCC.)
+- [ ] **macOS non-1080p30 card** — a 4K or 60/59.94/25 fps grabber opens and captures (regression: forcing `-framerate 30` + a guessed size made anything but 1080p30 fail to open).
+- [ ] **Linux node filter** — on a box with a UVC webcam / VAAPI / v4l2loopback, only real `VIDEO_CAPTURE` nodes are listed — no metadata/codec/output `/dev/videoN` shows as a bogus device. If your user isn't in the `video` group, the device fails gracefully (bounded backoff, actionable log), not a hot-spin.
+- [ ] **two identical grabbers** — two same-model cards each get a distinct id + a disambiguated label (`(#xxxx)`), not one collapsed entry.
+- [ ] **camera badge** — a built-in/USB webcam is listed with a "camera" badge; an HDMI grabber (e.g. "Cam Link 4K") is not badged.
+- [ ] **disable screenshots** — with screenshots disabled, capture devices are skipped entirely (an external feed has no accessibility tree, so it would produce nothing).
+
 ### 4. audio device handling
 
 - [ ] **meetings-only releases configured audio devices outside meetings** — Run `bun run test:e2e:meetings-only-audio` on macOS and Windows. The isolated real-audio lane must observe `0` running devices before a manual meeting, `>=1` while it is active, then `0` within one monitor tick after stop. `/health` must report `waiting_for_meeting` rather than a capture fault while idle. (#5611)

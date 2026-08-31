@@ -422,6 +422,15 @@ pub struct MonitorDevice {
     pub is_default: bool,
     pub width: u32,
     pub height: u32,
+    /// True for a video capture device (HDMI/UVC grabber) surfaced as a
+    /// pseudo-monitor, as opposed to a real display. Lets the settings UI badge
+    /// it and gate it behind the "record capture devices" toggle.
+    pub is_capture: bool,
+    /// Best-effort: true when a capture device looks like a webcam / built-in
+    /// camera rather than an HDMI/UVC grabber. Informational only — lets the
+    /// picker badge cameras distinctly; selection is unaffected. Always false
+    /// for real displays.
+    pub is_camera: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, specta::Type)]
@@ -497,6 +506,11 @@ pub async fn get_boot_phase() -> crate::health::BootPhaseSnapshot {
 
 pub async fn get_available_monitors() -> Result<Vec<MonitorDevice>, String> {
     debug!("Getting available monitors");
+    // Refresh the capture-device registry so a grabber plugged in while the app
+    // is running appears in the picker on the next Settings open (real monitors
+    // already refresh live via list_monitors). Incremental + cheap: a device
+    // already being recorded keeps its entry and is not re-probed.
+    screenpipe_screen::dshow_capture::refresh_capture_devices().await;
     let monitors = screenpipe_screen::monitor::list_monitors().await;
 
     if monitors.is_empty() {
@@ -506,17 +520,24 @@ pub async fn get_available_monitors() -> Result<Vec<MonitorDevice>, String> {
     let result: Vec<MonitorDevice> = monitors
         .iter()
         .enumerate()
-        .map(|(i, m)| MonitorDevice {
-            id: m.id(),
-            stable_id: m.stable_id(),
-            name: if m.name().is_empty() {
-                format!("Monitor {}", i + 1)
-            } else {
-                m.name().to_string()
-            },
-            is_default: i == 0,
-            width: m.width(),
-            height: m.height(),
+        .map(|(i, m)| {
+            // One registry lookup drives both the capture flag and the camera
+            // badge (None ⇒ real display ⇒ both false).
+            let capture = screenpipe_screen::dshow_capture::capture_device_entry(m.id());
+            MonitorDevice {
+                id: m.id(),
+                stable_id: m.stable_id(),
+                name: if m.name().is_empty() {
+                    format!("Monitor {}", i + 1)
+                } else {
+                    m.name().to_string()
+                },
+                is_default: i == 0,
+                width: m.width(),
+                height: m.height(),
+                is_capture: capture.is_some(),
+                is_camera: capture.as_ref().map(|e| e.is_camera).unwrap_or(false),
+            }
         })
         .collect();
 
